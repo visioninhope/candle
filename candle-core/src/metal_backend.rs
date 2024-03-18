@@ -263,7 +263,7 @@ impl MetalDevice {
                 }
             }
         }
-        return best_buffer.map(|b| b.clone());
+        best_buffer.cloned()
     }
 
     fn drop_unused_buffers(&self) -> Result<()> {
@@ -422,6 +422,7 @@ impl BackendStorage for MetalStorage {
             let name = match self.dtype {
                 DType::F32 => "powf_f32",
                 DType::F16 => "powf_f16",
+                DType::BF16 => "powf_bf16",
                 dtype => crate::bail!("Metal contiguous powf {dtype:?} not implemented"),
             };
             candle_metal_kernels::call_powf(
@@ -439,6 +440,7 @@ impl BackendStorage for MetalStorage {
             let name = match self.dtype {
                 DType::F32 => "powf_f32_strided",
                 DType::F16 => "powf_f16_strided",
+                DType::BF16 => "powf_bf16_strided",
                 dtype => crate::bail!("Metal strided powf {dtype:?} not implemented"),
             };
             candle_metal_kernels::call_powf_strided(
@@ -471,6 +473,7 @@ impl BackendStorage for MetalStorage {
             let name = match self.dtype {
                 DType::F32 => "elu_f32",
                 DType::F16 => "elu_f16",
+                DType::BF16 => "elu_bf16",
                 dtype => crate::bail!("Metal contiguous elu {dtype:?} not implemented"),
             };
             candle_metal_kernels::call_elu(
@@ -488,6 +491,7 @@ impl BackendStorage for MetalStorage {
             let name = match self.dtype {
                 DType::F32 => "elu_f32_strided",
                 DType::F16 => "elu_f16_strided",
+                DType::BF16 => "elu_bf16_strided",
                 dtype => crate::bail!("Metal strided elu {dtype:?} not implemented"),
             };
             candle_metal_kernels::call_elu_strided(
@@ -605,28 +609,41 @@ impl BackendStorage for MetalStorage {
         let command_buffer = device.command_buffer()?;
         if layout.is_contiguous() && layout.start_offset() == 0 {
             let kernel_name = match (self.dtype, dtype) {
-                (DType::U32, DType::F32) => "cast_u32_f32",
-                (DType::U32, DType::U8) => "cast_u32_u8",
-                (DType::U32, DType::I64) => "cast_u32_i64",
                 (DType::U32, DType::BF16) => "cast_u32_bf16",
+                (DType::U32, DType::F16) => "cast_u32_f16",
+                (DType::U32, DType::F32) => "cast_u32_f32",
+                (DType::U32, DType::I64) => "cast_u32_i64",
+                (DType::U32, DType::U8) => "cast_u32_u8",
 
-                (DType::U8, DType::U32) => "cast_u8_u32",
+                (DType::U8, DType::BF16) => "cast_u8_bf16",
+                (DType::U8, DType::F16) => "cast_u8_f16",
                 (DType::U8, DType::F32) => "cast_u8_f32",
                 (DType::U8, DType::I64) => "cast_u8_i64",
-                (DType::U8, DType::BF16) => "cast_u8_bf16",
+                (DType::U8, DType::U32) => "cast_u8_u32",
 
-                (DType::F32, DType::F16) => "cast_f32_f16",
                 (DType::F32, DType::BF16) => "cast_f32_bf16",
+                (DType::F32, DType::F16) => "cast_f32_f16",
+                (DType::F32, DType::I64) => "cast_f32_i64",
+                (DType::F32, DType::U32) => "cast_f32_u32",
+                (DType::F32, DType::U8) => "cast_f32_u8",
 
+                (DType::I64, DType::BF16) => "cast_i64_bf16",
+                (DType::I64, DType::F16) => "cast_i64_f16",
                 (DType::I64, DType::F32) => "cast_i64_f32",
+                (DType::I64, DType::U32) => "cast_i64_u32",
+                (DType::I64, DType::U8) => "cast_i64_u8",
 
                 (DType::F16, DType::BF16) => "cast_f16_bf16",
                 (DType::F16, DType::F32) => "cast_f16_f32",
+                (DType::F16, DType::I64) => "cast_f16_i64",
+                (DType::F16, DType::U32) => "cast_f16_u32",
+                (DType::F16, DType::U8) => "cast_f16_u8",
 
-                (DType::BF16, DType::U8) => "cast_bf16_u8",
-                (DType::BF16, DType::U32) => "cast_bf16_u32",
                 (DType::BF16, DType::F16) => "cast_bf16_f16",
                 (DType::BF16, DType::F32) => "cast_bf16_f32",
+                (DType::BF16, DType::I64) => "cast_bf16_i64",
+                (DType::BF16, DType::U32) => "cast_bf16_u32",
+                (DType::BF16, DType::U8) => "cast_bf16_u8",
 
                 (left, right) => {
                     crate::bail!("Metal contiguous to_dtype {left:?} {right:?} not implemented")
@@ -1031,8 +1048,46 @@ impl BackendStorage for MetalStorage {
         crate::bail!("Metal avg_pool2d not implemented")
     }
 
-    fn max_pool2d(&self, _: &Layout, _: (usize, usize), _: (usize, usize)) -> Result<Self> {
-        crate::bail!("Metal max_pool2d not implemented")
+    fn max_pool2d(
+        &self,
+        inp_l: &Layout,
+        (w_k, h_k): (usize, usize),
+        (w_stride, h_stride): (usize, usize),
+    ) -> Result<Self> {
+        let shape = inp_l.shape();
+        let (b_size, channels, width, height) = shape.dims4()?;
+        let strides = inp_l.stride();
+        let name = match self.dtype {
+            DType::F32 => "max_pool2d_f32",
+            DType::F16 => "max_pool2d_f16",
+            DType::BF16 => "max_pool2d_bf16",
+            DType::U8 => "max_pool2d_u8",
+            DType::U32 => "max_pool2d_u32",
+            dtype => crate::bail!("Metal upsample_nearest2d {dtype:?} not implemented"),
+        };
+        let out_w = (width - w_k) / w_stride + 1;
+        let out_h = (height - h_k) / h_stride + 1;
+        let dst_el = out_w * out_h * b_size * channels;
+        let buffer = self.device.new_buffer(dst_el, self.dtype, "max_pool2d")?;
+        let command_buffers = self.device.command_buffer()?;
+        candle_metal_kernels::call_max_pool2d(
+            &self.device.device,
+            &command_buffers,
+            &self.device.kernels,
+            name,
+            inp_l.dims(),
+            strides,
+            out_w,
+            out_h,
+            w_k,
+            h_k,
+            w_stride,
+            h_stride,
+            &self.buffer,
+            &buffer,
+        )
+        .map_err(MetalError::from)?;
+        Ok(Self::new(buffer, self.device.clone(), dst_el, self.dtype))
     }
 
     fn upsample_nearest1d(&self, _: &Layout, _: usize) -> Result<Self> {
@@ -1128,7 +1183,15 @@ impl BackendStorage for MetalStorage {
             None => Err(crate::Error::RequiresContiguous { op: "scatter-add" }.bt())?,
         };
         let name = match (ids.dtype, self.dtype) {
+            (DType::U8, DType::F32) => "sa_u8_f32",
+            (DType::U8, DType::F16) => "sa_u8_f16",
+            (DType::U8, DType::BF16) => "sa_u8_bf16",
             (DType::U32, DType::F32) => "sa_u32_f32",
+            (DType::U32, DType::F16) => "sa_u32_f16",
+            (DType::U32, DType::BF16) => "sa_u32_bf16",
+            (DType::I64, DType::F32) => "sa_i64_f32",
+            (DType::I64, DType::F16) => "sa_i64_f16",
+            (DType::I64, DType::BF16) => "sa_i64_bf16",
             _ => Err(MetalError::UnexpectedDType {
                 msg: "scatter-add ids should be u8/u32/i64",
                 expected: DType::U32,
@@ -1217,9 +1280,29 @@ impl BackendStorage for MetalStorage {
             None => Err(crate::Error::RequiresContiguous { op: "index-add" }.bt())?,
         };
         let name = match (ids.dtype, self.dtype) {
+            (DType::I64, DType::BF16) => "ia_i64_bf16",
+            (DType::I64, DType::F16) => "ia_i64_f16",
+            (DType::I64, DType::F32) => "ia_i64_f32",
+            (DType::I64, DType::I64) => "ia_i64_i64",
+            (DType::I64, DType::U32) => "ia_i64_u32",
+            (DType::I64, DType::U8) => "ia_i64_u8",
+
+            (DType::U32, DType::BF16) => "ia_u32_bf16",
+            (DType::U32, DType::F16) => "ia_u32_f16",
             (DType::U32, DType::F32) => "ia_u32_f32",
+            (DType::U32, DType::I64) => "ia_u32_i64",
+            (DType::U32, DType::U32) => "ia_u32_u32",
+            (DType::U32, DType::U8) => "ia_u32_u8",
+
+            (DType::U8, DType::BF16) => "ia_u8_bf16",
+            (DType::U8, DType::F16) => "ia_u8_f16",
+            (DType::U8, DType::F32) => "ia_u8_f32",
+            (DType::U8, DType::I64) => "ia_u8_i64",
+            (DType::U8, DType::U32) => "ia_u8_u32",
+            (DType::U8, DType::U8) => "ia_u8_u8",
+
             _ => Err(MetalError::UnexpectedDType {
-                msg: "index-add ids should be u32",
+                msg: "index-add ids should be u8/u32/i64",
                 expected: DType::U32,
                 got: ids.dtype(),
             })?,
@@ -1282,6 +1365,67 @@ impl BackendStorage for MetalStorage {
             b * m * n,
             self.dtype(),
         ))
+    }
+
+    fn copy2d(
+        &self,
+        dst: &mut Self,
+        d1: usize,
+        d2: usize,
+        src_s: usize,
+        dst_s: usize,
+        src_o: usize,
+        dst_o: usize,
+    ) -> Result<()> {
+        if self.dtype() != dst.dtype() {
+            crate::bail!(
+                "copy2d with inconsistent dtypes {:?} {:?}",
+                self.dtype(),
+                dst.dtype()
+            )
+        }
+        let command_buffer = self.device.command_buffer()?;
+        if src_s == d2 && dst_s == d2 {
+            command_buffer.set_label("copy2d_contiguous");
+            let blit = command_buffer.new_blit_command_encoder();
+            blit.set_label("copy2d_contiguous");
+            let src_offset = (src_o * self.dtype.size_in_bytes()) as NSUInteger;
+            let length = (d1 * d2 * self.dtype.size_in_bytes()) as NSUInteger;
+            let dst_offset = (dst_o * dst.dtype().size_in_bytes()) as NSUInteger;
+            blit.copy_from_buffer(&self.buffer, src_offset, dst.buffer(), dst_offset, length);
+            blit.end_encoding();
+        } else {
+            let el_count = d1 * d2;
+            if el_count == 0 {
+                return Ok(());
+            }
+            let kernel_name = match self.dtype {
+                DType::F32 => candle_metal_kernels::copy2d::FLOAT,
+                DType::F16 => candle_metal_kernels::copy2d::HALF,
+                DType::BF16 => candle_metal_kernels::copy2d::BFLOAT,
+                DType::I64 => candle_metal_kernels::copy2d::I64,
+                DType::U32 => candle_metal_kernels::copy2d::U32,
+                DType::U8 => candle_metal_kernels::copy2d::U8,
+                dtype => crate::bail!("Metal copy2d {dtype:?} not implemented"),
+            };
+            candle_metal_kernels::call_copy2d(
+                &self.device.device,
+                &command_buffer,
+                &self.device.kernels,
+                kernel_name,
+                &self.buffer,
+                &dst.buffer,
+                d1,
+                d2,
+                src_s,
+                dst_s,
+                src_o * self.dtype.size_in_bytes(),
+                dst_o * self.dtype.size_in_bytes(),
+            )
+            .map_err(MetalError::from)?;
+            command_buffer.set_label("copy2d");
+        }
+        Ok(())
     }
 
     fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, src_l: &Layout) -> Result<()> {
