@@ -1888,16 +1888,6 @@ impl BackendDevice for MetalDevice {
         self.device.registry_id() == rhs.device.registry_id()
     }
 
-    unsafe fn alloc_uninit(&self, shape: &Shape, dtype: DType) -> Result<MetalStorage> {
-        let buffer = self.new_buffer(shape.elem_count(), dtype, "alloc-uninit")?;
-        Ok(MetalStorage::new(
-            buffer,
-            self.clone(),
-            shape.elem_count(),
-            dtype,
-        ))
-    }
-
     fn zeros_impl(&self, shape: &Shape, dtype: DType) -> Result<MetalStorage> {
         self.alloc_impl(shape, dtype, Some(0))
     }
@@ -1944,10 +1934,6 @@ impl BackendDevice for MetalDevice {
             count,
             storage.dtype(),
         ))
-    }
-
-    fn storage_from_cpu_storage_owned(&self, storage: CpuStorage) -> Result<Self::Storage> {
-        self.storage_from_cpu_storage(&storage)
     }
 
     fn rand_uniform(
