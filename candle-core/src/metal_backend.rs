@@ -2,9 +2,8 @@ use crate::backend::{BackendDevice, BackendStorage};
 use crate::conv::{ParamsConv1D, ParamsConv2D, ParamsConvTranspose1D, ParamsConvTranspose2D};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::{CpuStorage, DType, Layout, Result, Shape};
-use candle_metal_kernels;
+use candle_metal_kernels::CallConvTranspose2dCfg;
 use candle_metal_kernels::Kernels;
-use metal;
 use metal::{Buffer, CommandBuffer, CommandQueue, MTLResourceOptions, NSUInteger};
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -948,12 +947,50 @@ impl BackendStorage for MetalStorage {
 
     fn conv_transpose1d(
         &self,
-        _l: &Layout,
-        _kernel: &Self,
-        _kernel_l: &Layout,
-        _params: &ParamsConvTranspose1D,
+        layout: &Layout,
+        k: &Self,
+        k_layout: &Layout,
+        params: &ParamsConvTranspose1D,
     ) -> Result<Self> {
-        crate::bail!("Metal conv_transpose1d not implemented")
+        let l_out = params.l_out();
+        let dst_el = params.c_out * l_out * params.b_size;
+        let buffer = self
+            .device
+            .new_buffer(dst_el, self.dtype, "conv_transpose1d")?;
+
+        let command_buffer = self.device.command_buffer()?;
+        let name = match self.dtype {
+            DType::F32 => "conv_transpose1d_f32",
+            DType::F16 => "conv_transpose1d_f16",
+            DType::BF16 => "conv_transpose1d_bf16",
+            DType::U32 => "conv_transpose1d_u32",
+            DType::U8 => "conv_transpose1d_u8",
+            dtype => crate::bail!("Metal conv_transpose1d {dtype:?} not implemented"),
+        };
+        candle_metal_kernels::call_conv_transpose1d(
+            &self.device.device,
+            &command_buffer,
+            &self.device.kernels,
+            name,
+            params.dilation,
+            params.stride,
+            params.padding,
+            params.output_padding,
+            params.c_out,
+            l_out,
+            params.b_size,
+            layout.dims(),
+            layout.stride(),
+            k_layout.dims(),
+            k_layout.stride(),
+            &self.buffer,
+            layout.start_offset() * self.dtype.size_in_bytes(),
+            &k.buffer,
+            k_layout.start_offset() * k.dtype.size_in_bytes(),
+            &buffer,
+        )
+        .map_err(MetalError::from)?;
+        Ok(Self::new(buffer, self.device.clone(), dst_el, self.dtype))
     }
 
     fn conv2d(
@@ -1036,12 +1073,66 @@ impl BackendStorage for MetalStorage {
 
     fn conv_transpose2d(
         &self,
-        _l: &Layout,
-        _kernel: &Self,
-        _kernel_l: &Layout,
-        _params: &ParamsConvTranspose2D,
+        l: &Layout,
+        kernel: &Self,
+        kernel_l: &Layout,
+        params: &ParamsConvTranspose2D,
     ) -> Result<Self> {
-        crate::bail!("Metal conv_tranpose2d not implemented")
+        // Kernel shape: (c_in_k, c_out, h_k, w_k)
+        // Input shape: (b_size, c_in, h_in, w_in)
+        let (out_w, out_h) = (params.out_w(), params.out_h());
+        let dst_el = params.c_out * out_w * out_h * params.b_size;
+
+        let dims = l.dims();
+        if dims.len() != 4 {
+            crate::bail!("unexpected input shape for conv_transpose2d {dims:?}, expected 4")
+        }
+
+        let k_dims = kernel_l.dims();
+        if k_dims.len() != 4 {
+            crate::bail!("unexpected kernel shape for conv_transpose2d {k_dims:?}, expected 4")
+        }
+
+        let buffer = self
+            .device
+            .new_buffer(dst_el, self.dtype, "conv_transpose2d")?;
+
+        let command_buffer = self.device.command_buffer()?;
+
+        let name = match self.dtype {
+            DType::F32 => "conv_transpose2d_f32",
+            DType::F16 => "conv_transpose2d_f16",
+            DType::BF16 => "conv_transpose2d_bf16",
+            dtype => crate::bail!("Metal conv_transpose2d {dtype:?} not implemented"),
+        };
+
+        candle_metal_kernels::call_conv_transpose2d(
+            &self.device.device,
+            &command_buffer,
+            &self.device.kernels,
+            name,
+            CallConvTranspose2dCfg {
+                dilation: params.dilation,
+                stride: params.stride,
+                padding: params.padding,
+                output_padding: params.output_padding,
+                c_out: params.c_out,
+                out_h: out_h,
+                out_w: out_w,
+                b_size: params.b_size,
+                input_dims: l.dims(),
+                input_stride: l.stride(),
+                kernel_dims: kernel_l.dims(),
+                kernel_stride: kernel_l.stride(),
+                input_offset: l.start_offset() * self.dtype.size_in_bytes(),
+                kernel_offset: kernel_l.start_offset() * kernel.dtype.size_in_bytes(),
+            },
+            &self.buffer,
+            &kernel.buffer,
+            &buffer,
+        )
+        .map_err(MetalError::from)?;
+        Ok(Self::new(buffer, self.device.clone(), dst_el, self.dtype))
     }
 
     fn avg_pool2d(
@@ -1256,12 +1347,8 @@ impl BackendStorage for MetalStorage {
     }
 
     fn index_select(&self, ids: &Self, src_l: &Layout, ids_l: &Layout, dim: usize) -> Result<Self> {
-        if !(src_l.is_contiguous()
-            && src_l.start_offset() == 0
-            && ids_l.is_contiguous()
-            && ids_l.start_offset() == 0)
-        {
-            crate::bail!("Metal strided index_select not implemented");
+        if !ids_l.is_contiguous() {
+            crate::bail!("Metal index_select requires contiguous ids")
         }
         let left_size: usize = src_l.dims()[..dim].iter().product();
         let right_size: usize = src_l.dims()[dim + 1..].iter().product();
@@ -1272,6 +1359,8 @@ impl BackendStorage for MetalStorage {
         let buffer = device.new_buffer(dst_el, dtype, "index_select")?;
         let name = match (ids.dtype, self.dtype) {
             (DType::U8, DType::BF16) => "is_u8_bf16",
+            (DType::U8, DType::F32) => "is_u8_f32",
+            (DType::U8, DType::F16) => "is_u8_f16",
 
             (DType::U32, DType::F32) => "is_u32_f32",
             (DType::U32, DType::F16) => "is_u32_f16",
@@ -1290,8 +1379,13 @@ impl BackendStorage for MetalStorage {
             src_l.dims(),
             ids_el,
             dim,
+            src_l.is_contiguous(),
+            src_l.dims(),
+            src_l.stride(),
             &self.buffer,
+            src_l.start_offset() * dtype.size_in_bytes(),
             &ids.buffer,
+            ids_l.start_offset() * ids.dtype.size_in_bytes(),
             &buffer,
         )
         .map_err(MetalError::from)?;
@@ -1794,6 +1888,16 @@ impl BackendDevice for MetalDevice {
         self.device.registry_id() == rhs.device.registry_id()
     }
 
+    unsafe fn alloc_uninit(&self, shape: &Shape, dtype: DType) -> Result<MetalStorage> {
+        let buffer = self.new_buffer(shape.elem_count(), dtype, "alloc-uninit")?;
+        Ok(MetalStorage::new(
+            buffer,
+            self.clone(),
+            shape.elem_count(),
+            dtype,
+        ))
+    }
+
     fn zeros_impl(&self, shape: &Shape, dtype: DType) -> Result<MetalStorage> {
         self.alloc_impl(shape, dtype, Some(0))
     }
@@ -1840,6 +1944,10 @@ impl BackendDevice for MetalDevice {
             count,
             storage.dtype(),
         ))
+    }
+
+    fn storage_from_cpu_storage_owned(&self, storage: CpuStorage) -> Result<Self::Storage> {
+        self.storage_from_cpu_storage(&storage)
     }
 
     fn rand_uniform(

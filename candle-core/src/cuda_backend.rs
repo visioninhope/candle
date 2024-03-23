@@ -11,6 +11,31 @@ use cudarc::driver::{
 use half::{bf16, f16};
 use std::sync::{Arc, Mutex};
 
+enum SlicePtrOrNull<T> {
+    Ptr(CudaSlice<T>),
+    Null,
+}
+
+unsafe impl<T: DeviceRepr> DeviceRepr for &SlicePtrOrNull<T> {
+    fn as_kernel_param(&self) -> *mut std::ffi::c_void {
+        match self {
+            SlicePtrOrNull::Ptr(slice) => slice.as_kernel_param(),
+            SlicePtrOrNull::Null => 0usize.as_kernel_param(),
+        }
+    }
+}
+
+impl SlicePtrOrNull<usize> {
+    fn params_from_layout(dev: &CudaDevice, l: &Layout) -> Result<Self> {
+        let ds = if l.is_contiguous() {
+            SlicePtrOrNull::Null
+        } else {
+            SlicePtrOrNull::Ptr(dev.htod_copy([l.dims(), l.stride()].concat()).w()?)
+        };
+        Ok(ds)
+    }
+}
+
 /// cudarc related errors
 #[derive(thiserror::Error, Debug)]
 pub enum CudaError {
@@ -578,7 +603,7 @@ impl Map1 for Affine {
         let dims = shape.dims();
         let el = shape.elem_count();
         let cfg = LaunchConfig::for_num_elems(el as u32);
-        let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
+        let ds = SlicePtrOrNull::params_from_layout(dev, layout)?;
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("affine"), kernels::AFFINE)?;
         // SAFETY: Set later by running the kernel.
@@ -610,7 +635,7 @@ impl Map1 for Elu {
         let dims = shape.dims();
         let el = shape.elem_count();
         let cfg = LaunchConfig::for_num_elems(el as u32);
-        let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
+        let ds = SlicePtrOrNull::params_from_layout(dev, layout)?;
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("uelu"), kernels::UNARY)?;
         // SAFETY: Set later by running the kernel.
@@ -733,7 +758,7 @@ impl Map1 for Powf {
         let dims = shape.dims();
         let el = shape.elem_count();
         let cfg = LaunchConfig::for_num_elems(el as u32);
-        let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
+        let ds = SlicePtrOrNull::params_from_layout(dev, layout)?;
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("upowf"), kernels::UNARY)?;
         // SAFETY: Set later by running the kernel.
@@ -866,7 +891,7 @@ impl<U: UnaryOpT> Map1 for U {
         let dims = shape.dims();
         let el_count = shape.elem_count();
         let cfg = LaunchConfig::for_num_elems(el_count as u32);
-        let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
+        let ds = SlicePtrOrNull::params_from_layout(dev, layout)?;
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>(U::KERNEL), kernels::UNARY)?;
         // SAFETY: Set later by running the kernel.
@@ -1416,9 +1441,14 @@ impl<U: crate::op::BinaryOpT> Map2 for U {
         let dims = shape.dims();
         let elem_count = shape.elem_count();
         let cfg = LaunchConfig::for_num_elems(elem_count as u32);
-        let dims_and_strides = dev
-            .htod_copy([dims, lhs_l.stride(), rhs_l.stride()].concat())
-            .w()?;
+        let dims_and_strides = if lhs_l.is_contiguous() && rhs_l.is_contiguous() {
+            SlicePtrOrNull::Null
+        } else {
+            SlicePtrOrNull::Ptr(
+                dev.htod_copy([dims, lhs_l.stride(), rhs_l.stride()].concat())
+                    .w()?,
+            )
+        };
         let lhs = &lhs.slice(lhs_l.start_offset()..);
         let rhs = &rhs.slice(rhs_l.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>(U::KERNEL), kernels::BINARY)?;
@@ -1445,9 +1475,14 @@ impl Map2Any for Cmp {
         let dims = shape.dims();
         let elem_count = shape.elem_count();
         let cfg = LaunchConfig::for_num_elems(elem_count as u32);
-        let dims_and_strides = dev
-            .htod_copy([dims, lhs_l.stride(), rhs_l.stride()].concat())
-            .w()?;
+        let dims_and_strides = if lhs_l.is_contiguous() && rhs_l.is_contiguous() {
+            SlicePtrOrNull::Null
+        } else {
+            SlicePtrOrNull::Ptr(
+                dev.htod_copy([dims, lhs_l.stride(), rhs_l.stride()].concat())
+                    .w()?,
+            )
+        };
         let lhs = &lhs.slice(lhs_l.start_offset()..);
         let rhs = &rhs.slice(rhs_l.start_offset()..);
         let name = match self.0 {
@@ -1654,7 +1689,7 @@ impl BackendStorage for CudaStorage {
         let el = shape.elem_count();
         let cfg = LaunchConfig::for_num_elems(el as u32);
         let dev = self.device();
-        let ds = dev.htod_copy([dims, layout.stride()].concat()).w()?;
+        let ds = SlicePtrOrNull::params_from_layout(dev, layout)?;
         let start_o = layout.start_offset();
         // This returns an i64 rather than a &i64, this is useful to get around some temporary
         // lifetime issue and is safe as long as self.slice does not go out of scope before inp
@@ -1858,7 +1893,10 @@ impl BackendStorage for CudaStorage {
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
         } else {
             // Make the kernel contiguous if not already the case.
-            let mut kernel_c = self.device().zeros_impl(kernel_l.shape(), kernel.dtype())?;
+            let mut kernel_c = unsafe {
+                self.device()
+                    .alloc_uninit(kernel_l.shape(), kernel.dtype())?
+            };
             kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
             let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
                 .transpose(1, 2)?
@@ -1866,7 +1904,7 @@ impl BackendStorage for CudaStorage {
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
         };
         let res_l = Layout::contiguous((b, l_out, n)).transpose(1, 2)?;
-        let mut res_t = self.device().zeros_impl(res_l.shape(), res.dtype())?;
+        let mut res_t = unsafe { self.device().alloc_uninit(res_l.shape(), res.dtype())? };
         res.copy_strided_src(&mut res_t, 0, &res_l)?;
         Ok(res_t)
     }
@@ -1923,7 +1961,10 @@ impl BackendStorage for CudaStorage {
             col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
         } else {
             // Make the kernel contiguous if not already the case.
-            let mut kernel_c = self.device().zeros_impl(kernel_l.shape(), kernel.dtype())?;
+            let mut kernel_c = unsafe {
+                self.device()
+                    .alloc_uninit(kernel_l.shape(), kernel.dtype())?
+            };
             kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
             let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
                 .transpose(1, 2)?
@@ -1933,7 +1974,7 @@ impl BackendStorage for CudaStorage {
         let res_l = Layout::contiguous((b, h_out, w_out, n))
             .transpose(1, 2)?
             .transpose(1, 3)?;
-        let mut res_t = self.device().zeros_impl(res_l.shape(), res.dtype())?;
+        let mut res_t = unsafe { self.device().alloc_uninit(res_l.shape(), res.dtype())? };
         res.copy_strided_src(&mut res_t, 0, &res_l)?;
         Ok(res_t)
     }
@@ -2070,7 +2111,7 @@ impl BackendStorage for CudaStorage {
         dim: usize,
     ) -> Result<Self> {
         let device = self.device().clone();
-        let mut acc = device.zeros_impl(l.shape(), self.dtype())?;
+        let mut acc = unsafe { device.alloc_uninit(l.shape(), self.dtype())? };
         self.copy_strided_src(&mut acc, 0, l)?;
         ScatterAdd(ids, ids_l, dim).map(&mut acc.slice, l.shape(), &src.slice, src_l, &device)?;
         Ok(acc)
@@ -2085,7 +2126,7 @@ impl BackendStorage for CudaStorage {
         dim: usize,
     ) -> Result<Self> {
         let device = self.device().clone();
-        let mut acc = device.zeros_impl(l.shape(), self.dtype())?;
+        let mut acc = unsafe { device.alloc_uninit(l.shape(), self.dtype())? };
         self.copy_strided_src(&mut acc, 0, l)?;
         IndexAdd(ids, ids_l, dim).map(&mut acc.slice, l.shape(), &src.slice, src_l, &device)?;
         Ok(acc)
@@ -2229,7 +2270,7 @@ impl BackendStorage for CudaStorage {
         }
         let cfg = LaunchConfig::for_num_elems(el_count as u32);
         let dev = &self.device;
-        let ds = dev.htod_copy([dims, src_l.stride()].concat()).w()?;
+        let ds = SlicePtrOrNull::params_from_layout(dev, src_l)?;
         match (&self.slice, &mut dst.slice) {
             (CudaStorageSlice::BF16(src), CudaStorageSlice::BF16(dst)) => {
                 let (src, mut dst) = slice_src_and_dst(src, src_l, dst, dst_offset);

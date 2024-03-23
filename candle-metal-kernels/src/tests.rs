@@ -600,20 +600,33 @@ fn affine_strided() {
 fn index_select() {
     let embedding = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
     let shape = [5, 2];
+    let stride = [2, 1];
     let ids = [0u32, 4, 2];
     let dim = 0;
-    let result = run_index_select(&embedding, &shape, &ids, dim, "is_u32_f32");
+    let result = run_index_select(&embedding, &shape, &stride, &ids, dim, "is_u32_f32");
     assert_eq!(result, vec![1.0f32, 2.0, 9.0, 10.0, 5.0, 6.0]);
 
     let embedding = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
     let shape = [2, 5];
+    let stride = [1, 2];
     let ids = [0u32, 1, 0];
     let dim = 0;
-    let result = run_index_select(&embedding, &shape, &ids, dim, "is_u32_f32");
+    let result = run_index_select(&embedding, &shape, &stride, &ids, dim, "is_u32_f32");
     assert_eq!(
         result,
         vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 1.0f32, 2.0, 3.0, 4.0, 5.0]
     );
+}
+
+#[test]
+fn index_select_strided() {
+    let embedding = (0..16).map(|x| x as f32).collect::<Vec<_>>();
+    let shape = [2, 2];
+    let stride = [2, 4];
+    let ids = [0u32];
+    let dim = 0;
+    let result = run_index_select_strided(&embedding, &shape, &stride, &ids, dim, "is_u32_f32");
+    assert_eq!(result, vec![0.0, 4.0]);
 }
 
 #[test]
@@ -623,9 +636,10 @@ fn index_select_f16() {
         .map(|x| f16::from_f32(x))
         .collect();
     let shape = [5, 2];
+    let stride = [2, 1];
     let ids = [0u32, 4, 2];
     let dim = 0;
-    let result = run_index_select(&embedding, &shape, &ids, dim, "is_u32_f16");
+    let result = run_index_select(&embedding, &shape, &stride, &ids, dim, "is_u32_f16");
     assert_eq!(
         approx_f16(result, 4),
         vec![1.0f32, 2.0, 9.0, 10.0, 5.0, 6.0]
@@ -636,9 +650,10 @@ fn index_select_f16() {
 fn index_select_is_u32_bf16() {
     let embedding: Vec<bf16> = (1..=10).map(|x| bf16::from_f32(x as f32)).collect();
     let shape = [5, 2];
+    let stride = [2, 1];
     let ids = [0u32, 4, 2];
     let dim = 0;
-    let result = run_index_select(&embedding, &shape, &ids, dim, "is_u32_bf16");
+    let result = run_index_select(&embedding, &shape, &stride, &ids, dim, "is_u32_bf16");
     assert_eq!(
         approx_bf16(result, 4),
         vec![1.0f32, 2.0, 9.0, 10.0, 5.0, 6.0]
@@ -649,9 +664,10 @@ fn index_select_is_u32_bf16() {
 fn index_select_is_u8_bf16() {
     let embedding: Vec<bf16> = (1..=10).map(|x| bf16::from_f32(x as f32)).collect();
     let shape = [5, 2];
+    let stride = [2, 1];
     let ids = [0u8, 4, 2];
     let dim = 0;
-    let result = run_index_select(&embedding, &shape, &ids, dim, "is_u8_bf16");
+    let result = run_index_select(&embedding, &shape, &stride, &ids, dim, "is_u8_bf16");
     assert_eq!(
         approx_bf16(result, 4),
         vec![1.0f32, 2.0, 9.0, 10.0, 5.0, 6.0]
@@ -662,9 +678,10 @@ fn index_select_is_u8_bf16() {
 fn index_select_dim1() {
     let embedding = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
     let shape = [5, 2];
+    let stride = [2, 1];
     let ids = [0u32, 1, 0];
     let dim = 1;
-    let result = run_index_select(&embedding, &shape, &ids, dim, "is_u32_f32");
+    let result = run_index_select(&embedding, &shape, &stride, &ids, dim, "is_u32_f32");
     assert_eq!(
         result,
         vec![1.0f32, 2.0, 1.0, 3.0, 4.0, 3.0, 5.0, 6.0, 5.0, 7.0, 8.0f32, 7.0, 9.0, 10.0, 9.0]
@@ -674,6 +691,7 @@ fn index_select_dim1() {
 fn run_index_select<T: Clone, I: Clone + std::fmt::Debug>(
     embeddings: &[T],
     shape: &[usize],
+    stride: &[usize],
     ids: &[I],
     dim: usize,
     name: &'static str,
@@ -699,8 +717,59 @@ fn run_index_select<T: Clone, I: Clone + std::fmt::Debug>(
         shape,
         ids.len(),
         dim,
+        true,
+        shape,
+        stride,
         &embeddings_buffer,
+        0,
         &ids_buffer,
+        0,
+        &dst_buffer,
+    )
+    .unwrap();
+
+    command_buffer.commit();
+    command_buffer.wait_until_completed();
+
+    read_to_vec(&dst_buffer, dst_el)
+}
+
+fn run_index_select_strided<T: Clone, I: Clone + std::fmt::Debug>(
+    embeddings: &[T],
+    shape: &[usize],
+    stride: &[usize],
+    ids: &[I],
+    dim: usize,
+    name: &'static str,
+) -> Vec<T> {
+    let device = Device::system_default().expect("no device found");
+
+    let command_queue = device.new_command_queue();
+    let command_buffer = command_queue.new_command_buffer();
+    let embeddings_buffer = new_buffer(&device, &embeddings);
+    let ids_buffer = new_buffer(&device, &ids);
+
+    let left_size: usize = shape[..dim].iter().product();
+    let right_size: usize = shape[dim + 1..].iter().product();
+    let dst_el = ids.len() * left_size * right_size;
+    let dst_buffer = new_buffer(&device, &vec![0.0f32; dst_el]);
+
+    let kernels = Kernels::new();
+    call_index_select(
+        &device,
+        &command_buffer,
+        &kernels,
+        name,
+        shape,
+        ids.len(),
+        dim,
+        false,
+        shape,
+        stride,
+        &embeddings_buffer,
+        0,
+        &ids_buffer,
+        0,
         &dst_buffer,
     )
     .unwrap();
@@ -1715,5 +1784,221 @@ fn avg_pool2d_u32() {
         "avg_pool2d_u32",
     );
     let expected = vec![2, 3, 4, 6, 7, 8, 10, 11, 12];
+    assert_eq!(results, expected);
+}
+
+fn run_conv_transpose1d<T: Clone>(
+    input: &[T],
+    input_shape: &[usize],
+    input_stride: &[usize],
+    kernel: &[T],
+    kernel_shape: &[usize],
+    kernel_stride: &[usize],
+    dilation: usize,
+    stride: usize,
+    padding: usize,
+    out_padding: usize,
+    name: &'static str,
+) -> Vec<T> {
+    let device = device();
+    let command_queue = device.new_command_queue();
+    let command_buffer = command_queue.new_command_buffer();
+
+    let c_out = kernel_shape[1];
+    let k_size = kernel_shape[2];
+    let b_size = input_shape[0];
+    let l_in = input_shape[2];
+    let l_out = (l_in - 1) * stride - 2 * padding + dilation * (k_size - 1) + out_padding + 1;
+    let dst_el = c_out * l_out * b_size;
+
+    let input = new_buffer(&device, input);
+    let kernel = new_buffer(&device, kernel);
+    let output = new_buffer(&device, &vec![0.0f32; dst_el]);
+    let kernels = Kernels::new();
+
+    call_conv_transpose1d(
+        &device,
+        command_buffer,
+        &kernels,
+        name,
+        dilation,
+        stride,
+        padding,
+        out_padding,
+        c_out,
+        l_out,
+        b_size,
+        input_shape,
+        input_stride,
+        kernel_shape,
+        kernel_stride,
+        &input,
+        0,
+        &kernel,
+        0,
+        &output,
+    )
+    .unwrap();
+    command_buffer.commit();
+    command_buffer.wait_until_completed();
+
+    read_to_vec(&output, dst_el)
+}
+
+#[test]
+fn conv_transpose1d_f32() {
+    let input = vec![1.0f32, 2.0, 3.0, 4.0];
+    let input_shape = &[1, 1, 4];
+    let input_stride = &[4, 4, 1];
+
+    let kernel = vec![1.0f32, 2.0, 3.0, 4.0];
+    let kernel_shape = &[1, 1, 4];
+    let kernel_stride = &[4, 4, 1];
+
+    let results = run_conv_transpose1d(
+        &input,
+        input_shape,
+        input_stride,
+        &kernel,
+        kernel_shape,
+        kernel_stride,
+        1,
+        1,
+        0,
+        0,
+        "conv_transpose1d_f32",
+    );
+
+    let expected = vec![1., 4., 10., 20., 25., 24., 16.];
+    assert_eq!(results, expected);
+}
+
+#[test]
+fn conv_transpose1d_f16() {
+    let input: Vec<f16> = vec![1.0, 2.0, 3.0, 4.0]
+        .iter()
+        .map(|v| f16::from_f32(*v))
+        .collect();
+    let input_shape = &[1, 1, 4];
+    let input_stride = &[4, 4, 1];
+
+    let kernel: Vec<f16> = vec![1.0, 2.0, 3.0, 4.0]
+        .iter()
+        .map(|v| f16::from_f32(*v))
+        .collect();
+    let kernel_shape = &[1, 1, 4];
+    let kernel_stride = &[4, 4, 1];
+
+    let results = run_conv_transpose1d(
+        &input,
+        input_shape,
+        input_stride,
+        &kernel,
+        kernel_shape,
+        kernel_stride,
+        1,
+        1,
+        0,
+        0,
+        "conv_transpose1d_f16",
+    );
+
+    let expected = vec![1., 4., 10., 20., 25., 24., 16.]
+        .iter()
+        .map(|v| f16::from_f32(*v))
+        .collect::<Vec<_>>();
+    assert_eq!(results, expected);
+}
+
+#[test]
+fn conv_transpose1d_bf16() {
+    let input: Vec<bf16> = vec![1.0, 2.0, 3.0, 4.0]
+        .iter()
+        .map(|v| bf16::from_f32(*v))
+        .collect();
+    let input_shape = &[1, 1, 4];
+    let input_stride = &[4, 4, 1];
+
+    let kernel: Vec<bf16> = vec![1.0, 2.0, 3.0, 4.0]
+        .iter()
+        .map(|v| bf16::from_f32(*v))
+        .collect();
+    let kernel_shape = &[1, 1, 4];
+    let kernel_stride = &[4, 4, 1];
+
+    let results = run_conv_transpose1d(
+        &input,
+        input_shape,
+        input_stride,
+        &kernel,
+        kernel_shape,
+        kernel_stride,
+        1,
+        1,
+        0,
+        0,
+        "conv_transpose1d_bf16",
+    );
+
+    let expected = vec![1., 4., 10., 20., 25., 24., 16.]
+        .iter()
+        .map(|v| bf16::from_f32(*v))
+        .collect::<Vec<_>>();
+    assert_eq!(results, expected);
+}
+
+#[test]
+fn conv_transpose1d_u8() {
+    let input: Vec<u8> = vec![1, 2, 3, 4];
+    let input_shape = &[1, 1, 4];
+    let input_stride = &[4, 4, 1];
+
+    let kernel: Vec<u8> = vec![1, 2, 3, 4];
+    let kernel_shape = &[1, 1, 4];
+    let kernel_stride = &[4, 4, 1];
+
+    let results = run_conv_transpose1d(
+        &input,
+        input_shape,
+        input_stride,
+        &kernel,
+        kernel_shape,
+        kernel_stride,
+        1,
+        1,
+        0,
+        0,
+        "conv_transpose1d_u8",
+    );
+
+    let expected = vec![1, 4, 10, 20, 25, 24, 16];
+    assert_eq!(results, expected);
+}
+
+#[test]
+fn conv_transpose1d_u32() {
+    let input: Vec<u32> = vec![1, 2, 3, 4];
+    let input_shape = &[1, 1, 4];
+    let input_stride = &[4, 4, 1];
+
+    let kernel: Vec<u32> = vec![1, 2, 3, 4];
+    let kernel_shape = &[1, 1, 4];
+    let kernel_stride = &[4, 4, 1];
+
+    let results = run_conv_transpose1d(
+        &input,
+        input_shape,
+        input_stride,
+        &kernel,
+        kernel_shape,
+        kernel_stride,
+        1,
+        1,
+        0,
+        0,
+        "conv_transpose1d_u32",
+    );
+
+    let expected = vec![1, 4, 10, 20, 25, 24, 16];
     assert_eq!(results, expected);
 }
