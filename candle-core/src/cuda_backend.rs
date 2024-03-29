@@ -1630,8 +1630,8 @@ fn gemm_config<T>(
         lda,
         ldb,
         ldc: n as i32,
-        if transa { cublasOperation_t::CUBLAS_OP_T } else { cublasOperation_t::CUBLAS_OP_N },
-        if transb { cublasOperation_t::CUBLAS_OP_T } else { cublasOperation_t::CUBLAS_OP_N },
+        transa: if transa { cublasOperation_t::CUBLAS_OP_T } else { cublasOperation_t::CUBLAS_OP_N },
+        transb: if transb { cublasOperation_t::CUBLAS_OP_T } else { cublasOperation_t::CUBLAS_OP_N },
     };
 
     let stride_b: usize = match lhs_stride[..lhs_stride.len() - 2] {
