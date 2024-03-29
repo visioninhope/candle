@@ -66,6 +66,20 @@ pub enum CudaError {
         rhs_stride: Vec<usize>,
         mnk: (usize, usize, usize),
     },
+    
+    #[error("lstride not contig: matmul is only supported for contiguous tensors lstride: {lhs_stride:?} rstride: {rhs_stride:?} mnk: {mnk:?}")]
+    LMatMulNonContiguous {
+        lhs_stride: Vec<usize>,
+        rhs_stride: Vec<usize>,
+        mnk: (usize, usize, usize),
+    },
+
+    #[error("rstride not contig: matmul is only supported for contiguous tensors lstride: {lhs_stride:?} rstride: {rhs_stride:?} mnk: {mnk:?}")]
+    RMatMulNonContiguous {
+        lhs_stride: Vec<usize>,
+        rhs_stride: Vec<usize>,
+        mnk: (usize, usize, usize),
+    },
 
     #[error("{msg}, expected: {expected:?}, got: {got:?}")]
     UnexpectedDType {
@@ -1595,7 +1609,7 @@ fn gemm_config<T>(
     } else if rhs_m1 == k && rhs_m2 == 1 {
         (k as i32, cublasOperation_t::CUBLAS_OP_T)
     } else {
-        Err(CudaError::MatMulNonContiguous {
+        Err(CudaError::RMatMulNonContiguous {
             lhs_stride: lhs_stride.to_vec(),
             rhs_stride: rhs_stride.to_vec(),
             mnk: (m, n, k),
@@ -1607,7 +1621,7 @@ fn gemm_config<T>(
     } else if lhs_m1 == m && lhs_m2 == 1 {
         (m as i32, cublasOperation_t::CUBLAS_OP_T)
     } else {
-        Err(CudaError::MatMulNonContiguous {
+        Err(CudaError::LMatMulNonContiguous {
             lhs_stride: lhs_stride.to_vec(),
             rhs_stride: rhs_stride.to_vec(),
             mnk: (m, n, k),
