@@ -1619,6 +1619,8 @@ fn gemm_config<T>(
     let (lda, transa) = matrix_strides((k, n), [rhs_m1, rhs_m2]);
     // The b tensor has dims batching, m, k (lhs)
     let (ldb, transb) = matrix_strides((m,k), [lhs_m1, lhs_m2]);
+    dbg!(lda);
+    dbg!(ldb);
     // The setup below was copied from:
     // https://github.com/lebedov/scikit-cuda/blob/7e7300474286019c917a6c8a4bca59405c64fbce/tests/test_cublas.py#L531
     let gemm = GemmConfig {
@@ -1633,6 +1635,8 @@ fn gemm_config<T>(
         transa: if transa { cublasOperation_t::CUBLAS_OP_T } else { cublasOperation_t::CUBLAS_OP_N },
         transb: if transb { cublasOperation_t::CUBLAS_OP_T } else { cublasOperation_t::CUBLAS_OP_N },
     };
+    dbg!(&rhs_stride);
+    dbg!(&lhs_stride);
 
     Ok(StridedBatchedConfig {
         batch_size: b as i32,
