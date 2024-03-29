@@ -1634,32 +1634,11 @@ fn gemm_config<T>(
         transb: if transb { cublasOperation_t::CUBLAS_OP_T } else { cublasOperation_t::CUBLAS_OP_N },
     };
 
-    let stride_b: usize = match lhs_stride[..lhs_stride.len() - 2] {
-        [s1, stride] if s1 == stride * lhs_l.dims()[1] => stride,
-        [stride] => stride,
-        [] => m * k,
-        _ => Err(CudaError::MatMulNonContiguous {
-            lhs_stride: lhs_stride.to_vec(),
-            rhs_stride: rhs_stride.to_vec(),
-            mnk: (m, n, k),
-        })?,
-    };
-    let stride_a: usize = match rhs_stride[..rhs_stride.len() - 2] {
-        [s1, stride] if s1 == stride * rhs_l.dims()[1] => stride,
-        [stride] => stride,
-        [] => n * k,
-        _ => Err(CudaError::MatMulNonContiguous {
-            lhs_stride: lhs_stride.to_vec(),
-            rhs_stride: rhs_stride.to_vec(),
-            mnk: (m, n, k),
-        })?,
-    };
-
     Ok(StridedBatchedConfig {
         batch_size: b as i32,
         gemm,
-        stride_a: stride_a as i64,
-        stride_b: stride_b as i64,
+        stride_a: rhs_stride[0] as i64,
+        stride_b: lhs_stride[0] as i64,
         stride_c: (m * n) as i64,
     })
 }
