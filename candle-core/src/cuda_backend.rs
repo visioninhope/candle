@@ -1588,13 +1588,13 @@ impl CudaStorage {
 }
 
 // https://github.com/coreylowman/dfdx/blob/4722a99d303f347d6088d95867d007c75ca6dd78/dfdx-core/src/tensor_ops/matmul/mod.rs#L316
-pub(super) fn matrix_strides((m, n): (usize, usize), strides: [usize; 2]) -> (usize, bool) {
+pub(super) fn matrix_strides((m, n): (usize, usize), strides: [usize; 2]) -> (i32, bool) {
     match strides {
-        [1, 0] => (m, true),
-        [0, 1] => (n, false),
-        [1, 1] => (n, false),
-        [ld, 1] => (ld, false),
-        [1, ld] => (ld, true),
+        [1, 0] => (m as i32, true),
+        [0, 1] => (n as i32, false),
+        [1, 1] => (n as i32, false),
+        [ld, 1] => (ld as i32, false),
+        [1, ld] => (ld as i32, true),
         _ => panic!("At least a single stride must be 1 for cublas"),
     }
 }
