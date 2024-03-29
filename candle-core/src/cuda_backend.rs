@@ -1621,6 +1621,12 @@ fn gemm_config<T>(
     let (ldb, transb) = matrix_strides((m,k), [lhs_m1, lhs_m2]);
     dbg!(lda);
     dbg!(ldb);
+    dbg!(n);
+    dbg!(m);
+    dbg!(k);
+    dbg!(ldb);
+    dbg!(transa);
+    dbg!(transb);
     // The setup below was copied from:
     // https://github.com/lebedov/scikit-cuda/blob/7e7300474286019c917a6c8a4bca59405c64fbce/tests/test_cublas.py#L531
     let gemm = GemmConfig {
