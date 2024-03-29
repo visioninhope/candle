@@ -1587,6 +1587,18 @@ impl CudaStorage {
     }
 }
 
+// https://github.com/coreylowman/dfdx/blob/4722a99d303f347d6088d95867d007c75ca6dd78/dfdx-core/src/tensor_ops/matmul/mod.rs#L316
+pub(super) fn matrix_strides((m, n): (usize, usize), strides: [usize; 2]) -> (usize, bool) {
+    match strides {
+        [1, 0] => (m, true),
+        [0, 1] => (n, false),
+        [1, 1] => (n, false),
+        [ld, 1] => (ld, false),
+        [1, ld] => (ld, true),
+        _ => panic!("At least a single stride must be 1 for cublas"),
+    }
+}
+
 fn gemm_config<T>(
     alpha: T,
     beta: T,
@@ -1604,29 +1616,9 @@ fn gemm_config<T>(
     let lhs_m1 = lhs_stride[lhs_stride.len() - 1];
     let lhs_m2 = lhs_stride[lhs_stride.len() - 2];
     // The a tensor has dims batching, k, n (rhs)
-    let (lda, transa) = if rhs_m1 == 1 && rhs_m2 == n {
-        (n as i32, cublasOperation_t::CUBLAS_OP_N)
-    } else if rhs_m1 == k && rhs_m2 == 1 {
-        (k as i32, cublasOperation_t::CUBLAS_OP_T)
-    } else {
-        Err(CudaError::RMatMulNonContiguous {
-            lhs_stride: lhs_stride.to_vec(),
-            rhs_stride: rhs_stride.to_vec(),
-            mnk: (m, n, k),
-        })?
-    };
+    let (lda, transa) = matrix_strides((k, n), [rhs_m1, rhs_m2]);
     // The b tensor has dims batching, m, k (lhs)
-    let (ldb, transb) = if lhs_m1 == 1 && lhs_m2 == k {
-        (k as i32, cublasOperation_t::CUBLAS_OP_N)
-    } else if lhs_m1 == m && lhs_m2 == 1 {
-        (m as i32, cublasOperation_t::CUBLAS_OP_T)
-    } else {
-        Err(CudaError::LMatMulNonContiguous {
-            lhs_stride: lhs_stride.to_vec(),
-            rhs_stride: rhs_stride.to_vec(),
-            mnk: (m, n, k),
-        })?
-    };
+    let (ldb, transb) = matrix_strides((m,k), [lhs_m1, lhs_m2]);
     // The setup below was copied from:
     // https://github.com/lebedov/scikit-cuda/blob/7e7300474286019c917a6c8a4bca59405c64fbce/tests/test_cublas.py#L531
     let gemm = GemmConfig {
@@ -1638,8 +1630,8 @@ fn gemm_config<T>(
         lda,
         ldb,
         ldc: n as i32,
-        transa,
-        transb,
+        if transa { cublasOperation_t::CUBLAS_OP_T } else { cublasOperation_t::CUBLAS_OP_N },
+        if transb { cublasOperation_t::CUBLAS_OP_T } else { cublasOperation_t::CUBLAS_OP_N },
     };
 
     let stride_b: usize = match lhs_stride[..lhs_stride.len() - 2] {
